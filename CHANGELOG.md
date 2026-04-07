@@ -1,5 +1,32 @@
 # Changelog
 
+## v0.2.0 (2026-04-08)
+
+### 新功能：語音轉文字 SRT 字幕
+
+#### 功能說明
+- 新增 `app/core/transcriber.py`：使用 OpenAI Whisper（本機）將影片音訊辨識為 SRT 字幕檔
+- 語言固定為繁體中文（`initial_prompt` 引導輸出繁體字）
+- 字幕檔以 UTF-8 BOM 編碼寫入，Windows 播放器（MPC、PotPlayer）直接開啟無亂碼
+
+#### UI 變更
+- 設定面板新增「字幕設定」區塊：勾選「合併後自動產生 SRT」、選擇 Whisper 模型（tiny / base / small / medium）
+- 檔案清單每列新增「CC」藍色按鈕，可對單一影片產生 SRT（存於影片同目錄）
+- 辨識中進度條顯示脈衝動畫，狀態列顯示目前步驟
+
+#### 問題修正
+- 修正 Whisper 內部呼叫系統 `ffmpeg` 導致 `[WinError 2] 找不到檔案` 的錯誤
+  - 根本原因：`model.transcribe(影片路徑)` 會呼叫系統 PATH 中的 `ffmpeg`，但本專案的 ffmpeg 在 `assets/` 非 PATH
+  - 解法：先用 `assets/ffmpeg.exe` 提取音訊為暫存 WAV（16kHz 單聲道），再以 Python `wave` 模組讀成 numpy 陣列，直接傳給 `model.transcribe()`，完全繞過 Whisper 內部的 ffmpeg 呼叫
+
+#### 安裝需求
+```bash
+pip install openai-whisper
+```
+首次使用時 Whisper 會自動下載模型（base ≈ 145MB）
+
+---
+
 ## v0.1.0 (2026-04-08)
 
 ### 首次發佈

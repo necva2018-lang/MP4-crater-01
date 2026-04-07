@@ -45,6 +45,30 @@ class SettingsPanel(ctk.CTkFrame):
             anchor="w", padx=16, pady=(0, 12)
         )
 
+        # ── 字幕設定 ─────────────────────────────────────────────────
+        ctk.CTkLabel(
+            self, text="── 字幕設定 ──",
+            text_color=("gray50", "gray55"),
+            font=ctk.CTkFont(size=11),
+        ).pack(anchor="w", padx=16, pady=(4, 4))
+
+        self.auto_srt_var = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(
+            self, text="合併後自動產生 SRT",
+            variable=self.auto_srt_var,
+        ).pack(anchor="w", padx=16, pady=(0, 6))
+
+        model_row = ctk.CTkFrame(self, fg_color="transparent")
+        model_row.pack(anchor="w", padx=16, pady=(0, 12))
+        ctk.CTkLabel(model_row, text="Whisper 模型：", width=90, anchor="w").pack(side="left")
+        self.whisper_model_var = ctk.StringVar(value="base")
+        ctk.CTkOptionMenu(
+            model_row,
+            values=["tiny", "base", "small", "medium"],
+            variable=self.whisper_model_var,
+            width=100,
+        ).pack(side="left")
+
         # ── 進階設定（可展開） ───────────────────────────────────────
         self.adv_toggle_btn = ctk.CTkButton(
             self,
@@ -126,11 +150,13 @@ class SettingsPanel(ctk.CTkFrame):
         acodec_map = {"自動": "auto", "AAC": "aac", "MP3": "mp3", "複製": "copy"}
         hw_map = {"無": "none", "NVENC (NVIDIA)": "nvenc", "AMF (AMD)": "amf", "QSV (Intel)": "qsv"}
         return {
-            "output_format": self.format_var.get(),
-            "output_dir":    self.path_var.get(),
-            "filename":      self.filename_var.get() or "output",
-            "video_codec":   vcodec_map.get(self.vcodec_var.get(), "auto"),
-            "audio_codec":   acodec_map.get(self.acodec_var.get(), "auto"),
-            "crf":           int(self.crf_var.get()),
-            "hw_accel":      hw_map.get(self.hw_var.get(), "none"),
+            "output_format":  self.format_var.get(),
+            "output_dir":     self.path_var.get(),
+            "filename":       self.filename_var.get() or "output",
+            "video_codec":    vcodec_map.get(self.vcodec_var.get(), "auto"),
+            "audio_codec":    acodec_map.get(self.acodec_var.get(), "auto"),
+            "crf":            int(self.crf_var.get()),
+            "hw_accel":       hw_map.get(self.hw_var.get(), "none"),
+            "auto_srt":       self.auto_srt_var.get(),
+            "whisper_model":  self.whisper_model_var.get(),
         }

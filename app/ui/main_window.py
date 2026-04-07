@@ -9,15 +9,17 @@ import customtkinter as ctk
 from tkinterdnd2 import TkinterDnD, DND_FILES
 
 from app.core.merger import merge_videos, OUTPUT_FORMATS
+from app.core.transcriber import check_whisper, transcribe_to_srt
 from app.utils.file_helper import is_supported_video, scan_folder, resolve_output_path
 from app.ui.file_list import FileListPanel
 from app.ui.settings_panel import SettingsPanel
 
 # 狀態常數
-IDLE    = "IDLE"
-RUNNING = "RUNNING"
-DONE    = "DONE"
-ERROR   = "ERROR"
+IDLE        = "IDLE"
+RUNNING     = "RUNNING"
+TRANSCRIBING = "TRANSCRIBING"
+DONE        = "DONE"
+ERROR       = "ERROR"
 
 
 class MainWindow(TkinterDnD.Tk):
@@ -33,6 +35,9 @@ class MainWindow(TkinterDnD.Tk):
         self._state = IDLE
         self._cancel_event: threading.Event | None = None
         self._skipped_count = 0
+        self._pulse_job = None        # after() job ID，脈衝動畫用
+        self._pulse_dir = 1           # 動畫方向
+        self._pulse_val = 0.0
 
         self._build_ui()
         self._set_state(IDLE)
@@ -70,7 +75,9 @@ class MainWindow(TkinterDnD.Tk):
 
         # 左側：檔案清單
         self.file_list = FileListPanel(
-            body, on_list_changed=self._on_list_changed
+            body,
+            on_list_changed=self._on_list_changed,
+            on_generate_srt=self._generate_srt_for_file,
         )
         self.file_list.pack(side="left", fill="both", expand=True, padx=(0, 4))
 
@@ -213,15 +220,25 @@ class MainWindow(TkinterDnD.Tk):
             self.eta_label.configure(text=f"預估剩餘：{m} 分 {s:02d} 秒")
 
     def _on_merge_done(self, result: dict, output_path: str):
-        # 顯示「複製 + 異格式」自動覆蓋提示
         if result.get("warning"):
             self._show_status(f"⚠ {result['warning']}")
 
         if result["success"]:
-            self._set_state(DONE)
             self._on_progress(100, 0)
             self.eta_label.configure(text="合併完成！")
-            msgbox.showinfo("完成", f"合併完成！\n儲存至：{output_path}")
+            s = self.settings.get_settings()
+            if s.get("auto_srt"):
+                # 合併成功後接著產生 SRT
+                self._set_state(TRANSCRIBING)
+                self._start_transcription(
+                    video_path=output_path,
+                    srt_path=os.path.splitext(output_path)[0] + ".srt",
+                    model_size=s["whisper_model"],
+                    on_done=lambda r: self._on_srt_done(r, output_path, auto=True),
+                )
+            else:
+                self._set_state(DONE)
+                msgbox.showinfo("完成", f"合併完成！\n儲存至：{output_path}")
         else:
             err = result.get("error", "未知錯誤")
             if "取消" in err:
@@ -232,11 +249,87 @@ class MainWindow(TkinterDnD.Tk):
                 self.eta_label.configure(text=f"錯誤：{err}")
                 msgbox.showerror("合併失敗", err)
 
+    # ── SRT 產生流程 ─────────────────────────────────────────────────
+
+    def _generate_srt_for_file(self, video_path: str):
+        """清單 CC 按鈕觸發：對單一影片產生 SRT。"""
+        if not check_whisper():
+            msgbox.showwarning(
+                "尚未安裝 Whisper",
+                "請先在終端機執行：\npip install openai-whisper",
+            )
+            return
+        if self._state == TRANSCRIBING:
+            msgbox.showinfo("辨識中", "目前已有辨識工作進行中，請稍候。")
+            return
+
+        srt_path = os.path.splitext(video_path)[0] + ".srt"
+        model_size = self.settings.get_settings().get("whisper_model", "base")
+        self._set_state(TRANSCRIBING)
+        self._start_transcription(
+            video_path=video_path,
+            srt_path=srt_path,
+            model_size=model_size,
+            on_done=lambda r: self._on_srt_done(r, srt_path, auto=False),
+        )
+
+    def _start_transcription(self, video_path, srt_path, model_size, on_done):
+        """在背景執行緒執行 Whisper 辨識。"""
+        def worker():
+            result = transcribe_to_srt(
+                video_path=video_path,
+                output_srt_path=srt_path,
+                model_size=model_size,
+                status_callback=lambda msg: self.after(0, self.eta_label.configure, {"text": msg}),
+            )
+            self.after(0, on_done, result)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_srt_done(self, result: dict, path: str, auto: bool):
+        """辨識完成後的 UI 更新。"""
+        self._stop_pulse()
+        if result["success"]:
+            self._set_state(DONE)
+            srt_path = os.path.splitext(path)[0] + ".srt" if auto else path
+            self.eta_label.configure(text="字幕產生完成！")
+            msgbox.showinfo("完成", f"SRT 字幕已產生：\n{srt_path}")
+        else:
+            err = result.get("error", "未知錯誤")
+            self._set_state(ERROR)
+            self.eta_label.configure(text=f"辨識失敗：{err}")
+            msgbox.showerror("語音辨識失敗", err)
+
+    # ── 脈衝進度動畫（Whisper 無法回報進度，以動畫代替） ─────────────
+
+    def _start_pulse(self):
+        self._pulse_val = 0.0
+        self._pulse_dir = 1
+        self._pulse_step()
+
+    def _pulse_step(self):
+        self._pulse_val += self._pulse_dir * 0.03
+        if self._pulse_val >= 1.0:
+            self._pulse_val = 1.0
+            self._pulse_dir = -1
+        elif self._pulse_val <= 0.0:
+            self._pulse_val = 0.0
+            self._pulse_dir = 1
+        self.progress_bar.set(self._pulse_val)
+        self._pulse_job = self.after(80, self._pulse_step)
+
+    def _stop_pulse(self):
+        if self._pulse_job:
+            self.after_cancel(self._pulse_job)
+            self._pulse_job = None
+        self.progress_bar.set(0)
+
     # ── 狀態機 ──────────────────────────────────────────────────────
 
     def _set_state(self, state: str):
         self._state = state
         if state == IDLE:
+            self._stop_pulse()
             self.start_btn.configure(state="normal")
             self.cancel_btn.configure(state="disabled")
             self.progress_bar.set(0)
@@ -245,7 +338,13 @@ class MainWindow(TkinterDnD.Tk):
         elif state == RUNNING:
             self.start_btn.configure(state="disabled")
             self.cancel_btn.configure(state="normal")
+        elif state == TRANSCRIBING:
+            self.start_btn.configure(state="disabled")
+            self.cancel_btn.configure(state="disabled")
+            self.progress_label.configure(text="辨識中")
+            self._start_pulse()
         elif state in (DONE, ERROR):
+            self._stop_pulse()
             self.start_btn.configure(state="normal")
             self.cancel_btn.configure(state="disabled")
 

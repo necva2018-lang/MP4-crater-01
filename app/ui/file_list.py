@@ -22,9 +22,10 @@ ROW_HEIGHT = 30   # 每列大約高度（px），用於計算拖曳目標位置
 
 
 class FileListPanel(ctk.CTkFrame):
-    def __init__(self, master, on_list_changed=None, **kwargs):
+    def __init__(self, master, on_list_changed=None, on_generate_srt=None, **kwargs):
         super().__init__(master, **kwargs)
         self._on_list_changed = on_list_changed
+        self._on_generate_srt = on_generate_srt
         self._files: list[str] = []
         self._info_cache: dict[str, dict] = {}
 
@@ -153,7 +154,17 @@ class FileListPanel(ctk.CTkFrame):
             fg_color="transparent", text_color=("gray50", "gray60"),
             hover_color=("gray80", "gray30"),
             command=lambda i=idx: self.remove_file(i),
-        ).pack(side="left", padx=(2, 4))
+        ).pack(side="left", padx=(2, 2))
+
+        # 字幕按鈕（CC）
+        if self._on_generate_srt:
+            ctk.CTkButton(
+                row, text="CC", width=34, height=24,
+                fg_color="transparent", text_color=("#2196F3", "#64B5F6"),
+                hover_color=("gray80", "gray30"),
+                font=ctk.CTkFont(size=11, weight="bold"),
+                command=lambda p=path: self._on_generate_srt(p),
+            ).pack(side="left", padx=(0, 4))
 
         # 綁定拖曳事件到把手（及整列）
         for widget in (handle, row):
