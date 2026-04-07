@@ -1,0 +1,34 @@
+# FFmpeg 執行檔（體積過大，請自行下載放入 assets/）
+assets/ffmpeg.exe
+assets/ffprobe.exe
+assets/*.exe
+assets/*.ico
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+*.spec.bak
+
+# PyInstaller 輸出
+dist/
+build/
+
+# 開發工具
+.venv/
+venv/
+.env
+*.log
+
+# Claude Code 內部資料
+.claude/
+
+# IDE
+.vscode/
+.idea/
+*.swp
