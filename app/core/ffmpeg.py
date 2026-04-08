@@ -6,9 +6,10 @@ import sys
 
 
 def get_base_dir() -> str:
-    """回傳程式根目錄。打包後為 .exe 所在目錄，開發時為 main.py 所在目錄。"""
+    """回傳程式根目錄。打包後為 _internal/ 目錄，開發時為 main.py 所在目錄。"""
     if getattr(sys, "frozen", False):
-        return os.path.dirname(sys.executable)
+        # PyInstaller 6.x onedir 模式：資源解壓至 _internal/（sys._MEIPASS）
+        return sys._MEIPASS  # type: ignore[attr-defined]
     # 本檔案位於 app/core/ffmpeg.py，根目錄為上兩層
     return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
