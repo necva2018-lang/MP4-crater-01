@@ -92,10 +92,58 @@ def _read_history_file(path: str) -> list[dict]:
 
 
 def _write_history_file(path: str, records: list[dict]) -> None:
-    """寫入歷史 JSON。"""
+    """寫入歷史 JSON，並同步更新同目錄的 history.log（人類可讀格式）。"""
     with open(path, "w", encoding="utf-8") as f:
         json.dump({"version": 1, "records": records}, f,
                   ensure_ascii=False, indent=2)
+    # 同步寫出可讀版
+    log_path = os.path.splitext(path)[0] + ".log"
+    _write_history_log(log_path, records)
+
+
+def _write_history_log(log_path: str, records: list[dict]) -> None:
+    """將歷史紀錄寫成人類易讀的純文字格式。"""
+    SEP   = "=" * 72
+    DASH  = "-" * 72
+    lines = [
+        SEP,
+        "  VideoMerger 操作紀錄",
+        f"  最後更新：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        f"  共 {len(records)} 筆",
+        SEP,
+        "",
+    ]
+    for rec in reversed(records):        # 最新在上
+        success   = rec.get("success", False)
+        status    = "✅ 成功" if success else "❌ 失敗"
+        ts        = rec.get("timestamp", "").replace("T", "  ")
+        rec_type  = "合併" if rec.get("type") == "merge" else "SRT 字幕"
+        proj      = rec.get("project_name", "—")
+        files     = rec.get("input_files", [])
+        cnt       = rec.get("input_count", len(files))
+        files_str = " / ".join(files[:5]) + (f" 等{cnt}個" if cnt > 5 else f"（{cnt} 個）")
+        out_path  = rec.get("output_path", "—")
+        fmt       = rec.get("output_format", "—")
+        dur       = rec.get("duration_sec", 0.0)
+        try:
+            m, s = divmod(int(dur), 60)
+            dur_str = f"{m} 分 {s:02d} 秒"
+        except (TypeError, ValueError):
+            dur_str = "—"
+
+        lines += [
+            f"[{ts}]  {status}  {rec_type}",
+            f"  專案名稱：{proj}",
+            f"  輸入檔案：{files_str}",
+            f"  輸出路徑：{out_path}",
+            f"  輸出格式：{fmt}　　處理耗時：{dur_str}",
+        ]
+        if not success and rec.get("error"):
+            lines.append(f"  錯誤原因：{rec['error']}")
+        lines += [DASH, ""]
+
+    with open(log_path, "w", encoding="utf-8-sig") as f:   # BOM → Notepad 不亂碼
+        f.write("\n".join(lines))
 
 
 def _make_record(
