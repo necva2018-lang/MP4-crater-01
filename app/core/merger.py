@@ -1,4 +1,6 @@
-"""影片合併核心邏輯。支援快速合併（concat copy）與重新編碼兩條路線。"""
+"""影片合併核心邏輯。支援快速合併（concat copy）與重新編碼兩條路線。
+檔案數量多或體積大時，自動採用分批合併（Chunked Merge）降低資源壓力。
+"""
 
 import os
 import re
@@ -6,6 +8,9 @@ import subprocess
 import tempfile
 import threading
 from typing import Callable
+
+# 每批最多處理幾個檔案（re-encode 模式）。超過此數量時啟用分批合併。
+CHUNK_SIZE = 8
 
 from app.core.ffmpeg import get_ffmpeg_path
 from app.core.probe import detect_mixed_format, get_probe
@@ -129,7 +134,14 @@ def merge_videos(
         return {"success": False, "error": f"無法建立暫存檔：{e}", "warning": None}
 
     try:
-        if need_reencode:
+        if need_reencode and len(input_files) > CHUNK_SIZE:
+            # 檔案多時分批重新編碼，避免單一 FFmpeg 行程資源爆炸
+            result = _chunked_reencode(
+                input_files, output_path, fmt,
+                video_codec, audio_codec, crf, hw_accel,
+                file_infos, total_duration, progress_callback, cancel_event,
+            )
+        elif need_reencode:
             result = _run_reencode(
                 concat_list_path, output_path, fmt,
                 video_codec, audio_codec, crf, hw_accel,
@@ -309,3 +321,123 @@ def _run_ffmpeg(
 def output_path_from_cmd(cmd: list[str]) -> str:
     """從 FFmpeg 指令列取出最後一個引數作為輸出路徑。"""
     return cmd[-1]
+
+
+# ── 分批合併（Chunked Merge）────────────────────────────────────────────────
+
+def _chunked_reencode(
+    input_files: list[str],
+    output_path: str,
+    fmt: dict,
+    video_codec: str,
+    audio_codec: str,
+    crf: int,
+    hw_accel: str,
+    file_infos: list[dict],
+    total_duration: float,
+    progress_callback,
+    cancel_event: threading.Event | None,
+) -> dict:
+    """
+    將輸入檔案分成多批（每批 CHUNK_SIZE 個），各批重新編碼為暫存 MP4，
+    最後 concat-copy 合併成最終輸出。
+
+    進度分配：
+      - 各批佔 0~95%，依該批時長在總時長中的比例分配
+      - 最後 concat-copy 佔 95~100%
+    """
+    tmp_dir = tempfile.mkdtemp(prefix="videomerger_chunks_")
+    tmp_files: list[str] = []
+
+    try:
+        # 分批
+        chunks = [input_files[i:i + CHUNK_SIZE] for i in range(0, len(input_files), CHUNK_SIZE)]
+        chunk_durations = []
+        for chunk in chunks:
+            dur = sum(
+                (file_infos[input_files.index(f)]["duration"] or 0.0)
+                for f in chunk
+                if file_infos[input_files.index(f)]["error"] is None
+            )
+            chunk_durations.append(dur)
+
+        encode_total = total_duration if total_duration > 0 else 1.0
+        # 前 95% 給所有批次的重新編碼，後 5% 給最終 concat
+        ENCODE_WEIGHT = 0.95
+        progress_base = 0.0
+
+        for chunk_idx, (chunk, chunk_dur) in enumerate(zip(chunks, chunk_durations)):
+            if cancel_event and cancel_event.is_set():
+                return {"success": False, "error": "使用者已取消"}
+
+            chunk_ratio = (chunk_dur / encode_total) * ENCODE_WEIGHT
+            tmp_out = os.path.join(tmp_dir, f"chunk_{chunk_idx:03d}.mp4")
+            tmp_files.append(tmp_out)
+
+            # 建立此批的 concat list
+            tmp_fd, tmp_list = tempfile.mkstemp(suffix=".txt", dir=tmp_dir)
+            try:
+                with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
+                    for p in chunk:
+                        f.write(f"file '{os.path.abspath(p).replace(chr(92), '/')}'\n")
+
+                # 包裝 progress_callback，將此批進度映射到全域進度
+                def _scoped_cb(pct, eta, _base=progress_base, _ratio=chunk_ratio):
+                    if progress_callback:
+                        global_pct = _base * 100 + pct * _ratio
+                        progress_callback(min(global_pct, 95.0), eta)
+
+                result = _run_reencode(
+                    tmp_list, tmp_out, fmt,
+                    video_codec, audio_codec, crf, hw_accel,
+                    chunk_dur, _scoped_cb, cancel_event,
+                )
+            finally:
+                try:
+                    os.unlink(tmp_list)
+                except OSError:
+                    pass
+
+            if not result["success"]:
+                return result
+
+            progress_base += chunk_ratio
+
+        # 所有批次完成，最後 concat-copy 合併
+        if progress_callback:
+            progress_callback(95.0, 0.0)
+
+        final_fd, final_list = tempfile.mkstemp(suffix=".txt", dir=tmp_dir)
+        try:
+            with os.fdopen(final_fd, "w", encoding="utf-8") as f:
+                for p in tmp_files:
+                    f.write(f"file '{p.replace(chr(92), '/')}'\n")
+
+            def _final_cb(pct, eta):
+                if progress_callback:
+                    progress_callback(95.0 + pct * 0.05, eta)
+
+            result = _run_concat_copy(
+                final_list, output_path,
+                sum(chunk_durations), _final_cb, cancel_event,
+            )
+        finally:
+            try:
+                os.unlink(final_list)
+            except OSError:
+                pass
+
+        return result
+
+    finally:
+        # 清除所有暫存檔與暫存目錄
+        for p in tmp_files:
+            try:
+                if os.path.exists(p):
+                    os.unlink(p)
+            except OSError:
+                pass
+        try:
+            os.rmdir(tmp_dir)
+        except OSError:
+            pass
