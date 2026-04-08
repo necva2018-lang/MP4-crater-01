@@ -13,6 +13,7 @@ from pathlib import Path
 site_packages = Path(sys.executable).parent / "Lib" / "site-packages"
 customtkinter_path = site_packages / "customtkinter"
 tkinterdnd2_path   = site_packages / "tkinterdnd2"
+whisper_assets_path = site_packages / "whisper" / "assets"
 
 a = Analysis(
     ["main.py"],
@@ -22,8 +23,9 @@ a = Analysis(
         ("assets/ffprobe.exe", "assets"),
     ],
     datas=[
-        (str(customtkinter_path), "customtkinter"),
-        (str(tkinterdnd2_path),   "tkinterdnd2"),
+        (str(customtkinter_path),  "customtkinter"),
+        (str(tkinterdnd2_path),    "tkinterdnd2"),
+        (str(whisper_assets_path), "whisper/assets"),  # mel_filters.npz 等資源
     ],
     hiddenimports=[
         "customtkinter",
