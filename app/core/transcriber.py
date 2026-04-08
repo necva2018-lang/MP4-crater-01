@@ -84,6 +84,8 @@ def transcribe_to_srt(
             return {"success": False, "error": "使用者已取消"}
 
         # ── 步驟 2：將 WAV 讀成 numpy 陣列（繞過 Whisper 內部的 ffmpeg 呼叫）
+        import io
+        import sys
         import wave
         import numpy as np
         import whisper
@@ -91,25 +93,36 @@ def transcribe_to_srt(
         if status_callback:
             status_callback(f"載入 Whisper 模型（{model_size}）…")
 
-        model = whisper.load_model(model_size)
+        # PyInstaller console=False 時 sys.stdout/stderr 為 None，
+        # Whisper / tqdm 寫入時會拋出 AttributeError。先用假 stream 替代。
+        _stdout, _stderr = sys.stdout, sys.stderr
+        if sys.stdout is None:
+            sys.stdout = io.StringIO()
+        if sys.stderr is None:
+            sys.stderr = io.StringIO()
 
-        if cancel_event and cancel_event.is_set():
-            return {"success": False, "error": "使用者已取消"}
+        try:
+            model = whisper.load_model(model_size)
 
-        if status_callback:
-            status_callback(f"語音辨識中：{os.path.basename(video_path)}")
+            if cancel_event and cancel_event.is_set():
+                return {"success": False, "error": "使用者已取消"}
 
-        with wave.open(wav_tmp, "rb") as wf:
-            frames = wf.readframes(wf.getnframes())
-            audio_np = np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0
+            if status_callback:
+                status_callback(f"語音辨識中：{os.path.basename(video_path)}")
 
-        # 直接傳 numpy 陣列，Whisper 就不會去呼叫系統 ffmpeg
-        result = model.transcribe(
-            audio_np,
-            language="zh",
-            initial_prompt="以下是繁體中文的語音轉錄，請使用繁體中文輸出：",
-            verbose=False,
-        )
+            with wave.open(wav_tmp, "rb") as wf:
+                frames = wf.readframes(wf.getnframes())
+                audio_np = np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0
+
+            # 直接傳 numpy 陣列，Whisper 就不會去呼叫系統 ffmpeg
+            result = model.transcribe(
+                audio_np,
+                language="zh",
+                initial_prompt="以下是繁體中文的語音轉錄，請使用繁體中文輸出：",
+                verbose=False,
+            )
+        finally:
+            sys.stdout, sys.stderr = _stdout, _stderr
 
         if cancel_event and cancel_event.is_set():
             return {"success": False, "error": "使用者已取消"}
