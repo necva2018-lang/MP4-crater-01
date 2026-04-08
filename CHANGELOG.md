@@ -1,5 +1,23 @@
 # Changelog
 
+## v0.3.0 (2026-04-09)
+
+### PyInstaller 打包（Phase 8）完成
+
+- 新增 `build.spec`，執行 `pyinstaller build.spec -y` 即可產生 `dist/VideoMerger/VideoMerger.exe`
+- 自動包含 `assets/ffmpeg.exe`、`assets/ffprobe.exe`、customtkinter、tkinterdnd2、whisper assets
+
+### 打包 Bug 修正
+
+- **FFmpeg 路徑錯誤**：`get_base_dir()` 改用 `sys._MEIPASS`，正確對應 PyInstaller 6.x 的 `_internal/` 目錄
+- **Whisper assets 遺失**：`build.spec` 手動加入 `whisper/assets`（含 `mel_filters.npz` 等資源）
+- **語音辨識 NoneType 錯誤**：`console=False` 打包後 `sys.stdout/stderr` 為 None，改為呼叫 Whisper 前暫時替換為 `io.StringIO()`
+
+### 測試狀態
+影片合併、異格式重新編碼、CC 字幕辨識，打包版全部測試通過（2026-04-09）。
+
+---
+
 ## v0.2.0 (2026-04-08)
 
 ### 新功能：語音轉文字 SRT 字幕
