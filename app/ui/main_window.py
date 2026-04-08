@@ -1,6 +1,7 @@
-"""主視窗：整合工具列、檔案清單、設定面板、進度區。"""
+"""主視窗：整合工具列、檔案清單、設定面板、歷史面板、進度區。"""
 
 import os
+import time
 import threading
 import tkinter.filedialog as fd
 import tkinter.messagebox as msgbox
@@ -10,16 +11,22 @@ from tkinterdnd2 import TkinterDnD, DND_FILES
 
 from app.core.merger import merge_videos, OUTPUT_FORMATS
 from app.core.transcriber import check_whisper, transcribe_to_srt
-from app.utils.file_helper import is_supported_video, scan_folder, resolve_output_path
+from app.core.project import (
+    ensure_project_dir, get_project_output_path,
+    save_project, load_project,
+    make_and_save_record,
+)
+from app.utils.file_helper import is_supported_video, scan_folder
 from app.ui.file_list import FileListPanel
 from app.ui.settings_panel import SettingsPanel
+from app.ui.history_panel import HistoryPanel
 
 # 狀態常數
-IDLE        = "IDLE"
-RUNNING     = "RUNNING"
+IDLE         = "IDLE"
+RUNNING      = "RUNNING"
 TRANSCRIBING = "TRANSCRIBING"
-DONE        = "DONE"
-ERROR       = "ERROR"
+DONE         = "DONE"
+ERROR        = "ERROR"
 
 
 class MainWindow(TkinterDnD.Tk):
@@ -29,14 +36,17 @@ class MainWindow(TkinterDnD.Tk):
         ctk.set_default_color_theme("blue")
 
         self.title("影片合併工具")
-        self.geometry("900x620")
-        self.minsize(700, 480)
+        self.geometry("1060x620")
+        self.minsize(860, 480)
 
         self._state = IDLE
         self._cancel_event: threading.Event | None = None
-        self._skipped_count = 0
-        self._pulse_job = None        # after() job ID，脈衝動畫用
-        self._pulse_dir = 1           # 動畫方向
+        self._merge_start_time: float = 0.0
+        self._current_project_dir: str = ""
+        self._current_project_name: str = ""
+        self._current_input_files: list[str] = []
+        self._pulse_job = None
+        self._pulse_dir = 1
         self._pulse_val = 0.0
 
         self._build_ui()
@@ -66,10 +76,25 @@ class MainWindow(TkinterDnD.Tk):
             command=self._clear_all,
         ).pack(side="left", padx=4, pady=6)
 
+        # 分隔
+        ctk.CTkFrame(toolbar, width=1, height=28,
+                     fg_color=("gray70", "gray40")).pack(side="left", padx=8, pady=8)
+
+        ctk.CTkButton(
+            toolbar, text="💾 儲存專案", width=110,
+            fg_color="transparent", border_width=1,
+            command=self._save_project,
+        ).pack(side="left", padx=4, pady=6)
+        ctk.CTkButton(
+            toolbar, text="📂 開啟專案", width=110,
+            fg_color="transparent", border_width=1,
+            command=self._open_project,
+        ).pack(side="left", padx=4, pady=6)
+
         self.status_label = ctk.CTkLabel(toolbar, text="", text_color="gray60")
         self.status_label.pack(side="left", padx=12)
 
-        # 主體（左右分割）
+        # 主體（三欄）
         body = ctk.CTkFrame(self, fg_color="transparent")
         body.pack(fill="both", expand=True, padx=8, pady=(4, 0))
 
@@ -81,10 +106,15 @@ class MainWindow(TkinterDnD.Tk):
         )
         self.file_list.pack(side="left", fill="both", expand=True, padx=(0, 4))
 
-        # 右側：設定面板
-        self.settings = SettingsPanel(body, width=230)
-        self.settings.pack(side="right", fill="y")
+        # 中間：設定面板
+        self.settings = SettingsPanel(body, width=250)
+        self.settings.pack(side="left", fill="y", padx=(0, 4))
         self.settings.pack_propagate(False)
+
+        # 右側：歷史面板
+        self.history_panel = HistoryPanel(body, width=190)
+        self.history_panel.pack(side="right", fill="y")
+        self.history_panel.pack_propagate(False)
 
         # 底部：進度區
         bottom = ctk.CTkFrame(self, corner_radius=0, height=110)
@@ -101,7 +131,8 @@ class MainWindow(TkinterDnD.Tk):
         self.progress_label = ctk.CTkLabel(prog_row, text="0%", width=40)
         self.progress_label.pack(side="left")
 
-        self.eta_label = ctk.CTkLabel(bottom, text="", text_color="gray60", font=ctk.CTkFont(size=12))
+        self.eta_label = ctk.CTkLabel(
+            bottom, text="", text_color="gray60", font=ctk.CTkFont(size=12))
         self.eta_label.pack()
 
         btn_row = ctk.CTkFrame(bottom, fg_color="transparent")
@@ -147,20 +178,52 @@ class MainWindow(TkinterDnD.Tk):
         self.file_list.clear()
         self._show_status("清單已清空")
 
+    # ── 專案儲存/載入 ────────────────────────────────────────────────
+
+    def _save_project(self):
+        files = self.file_list.get_files()
+        if not files:
+            msgbox.showwarning("無檔案", "請先加入要合併的影片檔案。")
+            return
+        s = self.settings.get_settings()
+        project_dir  = ensure_project_dir(s["output_root"], s["project_name"])
+        project_name = s["project_name"]
+        try:
+            vmproj_path = save_project(project_dir, project_name, files, s)
+            self._show_status(f"已儲存：{os.path.basename(vmproj_path)}")
+        except OSError as e:
+            msgbox.showerror("儲存失敗", str(e))
+
+    def _open_project(self):
+        path = fd.askopenfilename(
+            title="開啟專案",
+            filetypes=[("VideoMerger 專案", "*.vmproj"), ("所有檔案", "*.*")],
+        )
+        if not path:
+            return
+        try:
+            data = load_project(path)
+        except ValueError as e:
+            msgbox.showerror("開啟失敗", str(e))
+            return
+        self.file_list.clear()
+        added = self.file_list.add_files(data["files"])
+        self.settings.set_settings(data["settings"])
+        self._show_status(f"已載入：{os.path.basename(path)}（{added} 個檔案）")
+
     # ── 拖曳放下 ────────────────────────────────────────────────────
 
     def _on_drop(self, event):
         paths = self.tk.splitlist(event.data)
         files_to_add = []
         for p in paths:
-            # 移除 Windows 路徑的大括號包裝
             p = p.strip("{}")
             if os.path.isdir(p):
                 files_to_add.extend(scan_folder(p))
             elif is_supported_video(p):
                 files_to_add.append(p)
         if files_to_add:
-            added = self.file_list.add_files(files_to_add)
+            added   = self.file_list.add_files(files_to_add)
             skipped = len(files_to_add) - added
             msg = f"已加入 {added} 個檔案"
             if skipped:
@@ -170,7 +233,7 @@ class MainWindow(TkinterDnD.Tk):
     # ── 清單變動 ────────────────────────────────────────────────────
 
     def _on_list_changed(self):
-        pass  # 目前由 FileListPanel 內部處理警告更新
+        pass
 
     # ── 合併流程 ────────────────────────────────────────────────────
 
@@ -180,9 +243,17 @@ class MainWindow(TkinterDnD.Tk):
             msgbox.showwarning("無檔案", "請先加入要合併的影片檔案。")
             return
 
-        s = self.settings.get_settings()
-        ext = OUTPUT_FORMATS[s["output_format"]]["ext"]
-        output_path = resolve_output_path(s["output_dir"], s["filename"], ext)
+        s            = self.settings.get_settings()
+        project_name = s["project_name"] or "MyProject"
+        project_dir  = ensure_project_dir(s["output_root"], project_name)
+        ext          = OUTPUT_FORMATS[s["output_format"]]["ext"]
+        output_path  = get_project_output_path(project_dir, project_name, ext)
+
+        # 記錄以供歷史用
+        self._current_project_dir  = project_dir
+        self._current_project_name = project_name
+        self._current_input_files  = list(files)
+        self._merge_start_time     = time.time()
 
         self._cancel_event = threading.Event()
         self._set_state(RUNNING)
@@ -206,7 +277,7 @@ class MainWindow(TkinterDnD.Tk):
             progress_callback=lambda pct, eta: self.after(0, self._on_progress, pct, eta),
             cancel_event=cancel_event,
         )
-        self.after(0, self._on_merge_done, result, output_path)
+        self.after(0, self._on_merge_done, result, output_path, settings)
 
     def _cancel_merge(self):
         if self._cancel_event:
@@ -219,21 +290,37 @@ class MainWindow(TkinterDnD.Tk):
             m, s = divmod(int(eta), 60)
             self.eta_label.configure(text=f"預估剩餘：{m} 分 {s:02d} 秒")
 
-    def _on_merge_done(self, result: dict, output_path: str):
+    def _on_merge_done(self, result: dict, output_path: str, settings: dict):
+        duration_sec = time.time() - self._merge_start_time
+
         if result.get("warning"):
             self._show_status(f"⚠ {result['warning']}")
 
         if result["success"]:
             self._on_progress(100, 0)
             self.eta_label.configure(text="合併完成！")
-            s = self.settings.get_settings()
-            if s.get("auto_srt"):
-                # 合併成功後接著產生 SRT
+
+            # 寫入歷史
+            make_and_save_record(
+                record_type="merge",
+                project_name=self._current_project_name,
+                project_dir=self._current_project_dir,
+                input_files=self._current_input_files,
+                output_path=output_path,
+                success=True,
+                error=None,
+                duration_sec=duration_sec,
+                output_format=settings["output_format"],
+            )
+            self.history_panel.refresh()
+
+            if settings.get("auto_srt"):
                 self._set_state(TRANSCRIBING)
+                srt_path = os.path.splitext(output_path)[0] + ".srt"
                 self._start_transcription(
                     video_path=output_path,
-                    srt_path=os.path.splitext(output_path)[0] + ".srt",
-                    model_size=s["whisper_model"],
+                    srt_path=srt_path,
+                    model_size=settings["whisper_model"],
                     on_done=lambda r: self._on_srt_done(r, output_path, auto=True),
                 )
             else:
@@ -241,6 +328,21 @@ class MainWindow(TkinterDnD.Tk):
                 msgbox.showinfo("完成", f"合併完成！\n儲存至：{output_path}")
         else:
             err = result.get("error", "未知錯誤")
+
+            # 寫入失敗歷史
+            make_and_save_record(
+                record_type="merge",
+                project_name=self._current_project_name,
+                project_dir=self._current_project_dir,
+                input_files=self._current_input_files,
+                output_path=output_path,
+                success=False,
+                error=err,
+                duration_sec=duration_sec,
+                output_format=settings["output_format"],
+            )
+            self.history_panel.refresh()
+
             if "取消" in err:
                 self._set_state(IDLE)
                 self.eta_label.configure(text="已取消")
@@ -252,7 +354,6 @@ class MainWindow(TkinterDnD.Tk):
     # ── SRT 產生流程 ─────────────────────────────────────────────────
 
     def _generate_srt_for_file(self, video_path: str):
-        """清單 CC 按鈕觸發：對單一影片產生 SRT。"""
         if not check_whisper():
             msgbox.showwarning(
                 "尚未安裝 Whisper",
@@ -263,8 +364,9 @@ class MainWindow(TkinterDnD.Tk):
             msgbox.showinfo("辨識中", "目前已有辨識工作進行中，請稍候。")
             return
 
-        srt_path = os.path.splitext(video_path)[0] + ".srt"
+        srt_path   = os.path.splitext(video_path)[0] + ".srt"
         model_size = self.settings.get_settings().get("whisper_model", "base")
+        self._merge_start_time = time.time()
         self._set_state(TRANSCRIBING)
         self._start_transcription(
             video_path=video_path,
@@ -274,7 +376,6 @@ class MainWindow(TkinterDnD.Tk):
         )
 
     def _start_transcription(self, video_path, srt_path, model_size, on_done):
-        """在背景執行緒執行 Whisper 辨識。"""
         def worker():
             result = transcribe_to_srt(
                 video_path=video_path,
@@ -287,20 +388,45 @@ class MainWindow(TkinterDnD.Tk):
         threading.Thread(target=worker, daemon=True).start()
 
     def _on_srt_done(self, result: dict, path: str, auto: bool):
-        """辨識完成後的 UI 更新。"""
         self._stop_pulse()
+        duration_sec = time.time() - self._merge_start_time
+        srt_path = os.path.splitext(path)[0] + ".srt" if auto else path
+
         if result["success"]:
             self._set_state(DONE)
-            srt_path = os.path.splitext(path)[0] + ".srt" if auto else path
             self.eta_label.configure(text="字幕產生完成！")
+            make_and_save_record(
+                record_type="srt",
+                project_name=self._current_project_name,
+                project_dir=self._current_project_dir,
+                input_files=[path],
+                output_path=srt_path,
+                success=True,
+                error=None,
+                duration_sec=duration_sec,
+                output_format="SRT",
+            )
+            self.history_panel.refresh()
             msgbox.showinfo("完成", f"SRT 字幕已產生：\n{srt_path}")
         else:
             err = result.get("error", "未知錯誤")
             self._set_state(ERROR)
             self.eta_label.configure(text=f"辨識失敗：{err}")
+            make_and_save_record(
+                record_type="srt",
+                project_name=self._current_project_name,
+                project_dir=self._current_project_dir,
+                input_files=[path],
+                output_path=srt_path,
+                success=False,
+                error=err,
+                duration_sec=duration_sec,
+                output_format="SRT",
+            )
+            self.history_panel.refresh()
             msgbox.showerror("語音辨識失敗", err)
 
-    # ── 脈衝進度動畫（Whisper 無法回報進度，以動畫代替） ─────────────
+    # ── 脈衝進度動畫 ────────────────────────────────────────────────
 
     def _start_pulse(self):
         self._pulse_val = 0.0
@@ -310,11 +436,9 @@ class MainWindow(TkinterDnD.Tk):
     def _pulse_step(self):
         self._pulse_val += self._pulse_dir * 0.03
         if self._pulse_val >= 1.0:
-            self._pulse_val = 1.0
-            self._pulse_dir = -1
+            self._pulse_val, self._pulse_dir = 1.0, -1
         elif self._pulse_val <= 0.0:
-            self._pulse_val = 0.0
-            self._pulse_dir = 1
+            self._pulse_val, self._pulse_dir = 0.0, 1
         self.progress_bar.set(self._pulse_val)
         self._pulse_job = self.after(80, self._pulse_step)
 
