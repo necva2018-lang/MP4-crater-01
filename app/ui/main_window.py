@@ -25,6 +25,7 @@ from app.ui.history_panel import HistoryPanel
 IDLE         = "IDLE"
 RUNNING      = "RUNNING"
 TRANSCRIBING = "TRANSCRIBING"
+BATCH_SRT    = "BATCH_SRT"
 DONE         = "DONE"
 ERROR        = "ERROR"
 
@@ -45,6 +46,7 @@ class MainWindow(TkinterDnD.Tk):
         self._current_project_dir: str = ""
         self._current_project_name: str = ""
         self._current_input_files: list[str] = []
+        self._batch_cancel_event: threading.Event | None = None
         self._pulse_job = None
         self._pulse_dir = 1
         self._pulse_val = 0.0
@@ -90,6 +92,18 @@ class MainWindow(TkinterDnD.Tk):
             fg_color="transparent", border_width=1,
             command=self._open_project,
         ).pack(side="left", padx=4, pady=6)
+
+        # 分隔
+        ctk.CTkFrame(toolbar, width=1, height=28,
+                     fg_color=("gray70", "gray40")).pack(side="left", padx=8, pady=8)
+
+        self.srt_batch_btn = ctk.CTkButton(
+            toolbar, text="🎤 批次轉字幕", width=120,
+            fg_color=("#1565C0", "#1976D2"),
+            hover_color=("#0D47A1", "#1565C0"),
+            command=self._start_batch_srt,
+        )
+        self.srt_batch_btn.pack(side="left", padx=4, pady=6)
 
         self.status_label = ctk.CTkLabel(toolbar, text="", text_color="gray60")
         self.status_label.pack(side="left", padx=12)
@@ -282,6 +296,8 @@ class MainWindow(TkinterDnD.Tk):
     def _cancel_merge(self):
         if self._cancel_event:
             self._cancel_event.set()
+        if self._batch_cancel_event:
+            self._batch_cancel_event.set()
 
     def _on_progress(self, percent: float, eta: float):
         self.progress_bar.set(percent / 100)
@@ -350,6 +366,130 @@ class MainWindow(TkinterDnD.Tk):
                 self._set_state(ERROR)
                 self.eta_label.configure(text=f"錯誤：{err}")
                 msgbox.showerror("合併失敗", err)
+
+    # ── 批次轉字幕 ───────────────────────────────────────────────────
+
+    def _start_batch_srt(self):
+        """批次對清單所有檔案進行語音辨識，SRT 存至使用者指定目錄。"""
+        if not check_whisper():
+            msgbox.showwarning(
+                "尚未安裝 Whisper",
+                "請先在終端機執行：\npip install openai-whisper",
+            )
+            return
+
+        files = self.file_list.get_files()
+        if not files:
+            msgbox.showwarning("無檔案", "請先加入要辨識的影片檔案。")
+            return
+
+        # 選擇 SRT 輸出目錄（預設使用目前專案目錄）
+        s = self.settings.get_settings()
+        default_dir = s.get("project_dir") or s.get("output_root", "")
+        out_dir = fd.askdirectory(
+            title="選擇 SRT 字幕輸出目錄",
+            initialdir=default_dir or os.path.expanduser("~"),
+        )
+        if not out_dir:
+            return
+
+        model_size = s.get("whisper_model", "base")
+        self._batch_cancel_event = threading.Event()
+        self._set_state(BATCH_SRT)
+        self.progress_bar.set(0)
+        self.progress_label.configure(text="0%")
+        self.eta_label.configure(text=f"準備辨識 {len(files)} 個檔案…")
+
+        thread = threading.Thread(
+            target=self._run_batch_srt,
+            args=(files, out_dir, model_size, self._batch_cancel_event),
+            daemon=True,
+        )
+        thread.start()
+
+    def _run_batch_srt(self, files: list[str], out_dir: str,
+                       model_size: str, cancel_event: threading.Event):
+        total    = len(files)
+        success  = 0
+        failed   = 0
+        skipped  = 0
+        start_t  = time.time()
+
+        os.makedirs(out_dir, exist_ok=True)
+
+        for idx, video_path in enumerate(files, start=1):
+            if cancel_event.is_set():
+                skipped = total - idx + 1
+                break
+
+            basename = os.path.splitext(os.path.basename(video_path))[0]
+            srt_path = os.path.join(out_dir, basename + ".srt")
+
+            # 更新進度
+            self.after(0, self._batch_progress_update,
+                       idx, total, os.path.basename(video_path))
+
+            result = transcribe_to_srt(
+                video_path=video_path,
+                output_srt_path=srt_path,
+                model_size=model_size,
+                status_callback=lambda msg: self.after(
+                    0, self.eta_label.configure, {"text": msg}),
+                cancel_event=cancel_event,
+            )
+
+            if result["success"]:
+                success += 1
+                make_and_save_record(
+                    record_type="srt",
+                    project_name=self._current_project_name or basename,
+                    project_dir=self._current_project_dir or out_dir,
+                    input_files=[video_path],
+                    output_path=srt_path,
+                    success=True,
+                    error=None,
+                    duration_sec=time.time() - start_t,
+                    output_format="SRT",
+                )
+            else:
+                failed += 1
+                make_and_save_record(
+                    record_type="srt",
+                    project_name=self._current_project_name or basename,
+                    project_dir=self._current_project_dir or out_dir,
+                    input_files=[video_path],
+                    output_path=srt_path,
+                    success=False,
+                    error=result.get("error"),
+                    duration_sec=time.time() - start_t,
+                    output_format="SRT",
+                )
+
+        self.after(0, self._on_batch_srt_done, success, failed, skipped, out_dir)
+
+    def _batch_progress_update(self, idx: int, total: int, filename: str):
+        pct = (idx - 1) / total * 100
+        self.progress_bar.set(pct / 100)
+        self.progress_label.configure(text=f"{idx}/{total}")
+        self.eta_label.configure(text=f"辨識中：{filename}")
+
+    def _on_batch_srt_done(self, success: int, failed: int,
+                           skipped: int, out_dir: str):
+        self._stop_pulse()
+        self.history_panel.refresh()
+        self.progress_bar.set(1.0)
+        self.progress_label.configure(text="完成")
+
+        lines = [f"批次轉字幕完成！\n輸出目錄：{out_dir}\n"]
+        lines.append(f"✅ 成功：{success} 個")
+        if failed:
+            lines.append(f"❌ 失敗：{failed} 個")
+        if skipped:
+            lines.append(f"⏭ 已略過（取消）：{skipped} 個")
+
+        self._set_state(DONE)
+        self.eta_label.configure(text=f"完成 {success}/{success+failed} 個")
+        msgbox.showinfo("批次轉字幕完成", "\n".join(lines))
 
     # ── SRT 產生流程 ─────────────────────────────────────────────────
 
@@ -456,21 +596,30 @@ class MainWindow(TkinterDnD.Tk):
             self._stop_pulse()
             self.start_btn.configure(state="normal")
             self.cancel_btn.configure(state="disabled")
+            self.srt_batch_btn.configure(state="normal")
             self.progress_bar.set(0)
             self.progress_label.configure(text="0%")
             self.eta_label.configure(text="")
         elif state == RUNNING:
             self.start_btn.configure(state="disabled")
             self.cancel_btn.configure(state="normal")
+            self.srt_batch_btn.configure(state="disabled")
         elif state == TRANSCRIBING:
             self.start_btn.configure(state="disabled")
             self.cancel_btn.configure(state="disabled")
+            self.srt_batch_btn.configure(state="disabled")
             self.progress_label.configure(text="辨識中")
+            self._start_pulse()
+        elif state == BATCH_SRT:
+            self.start_btn.configure(state="disabled")
+            self.cancel_btn.configure(state="normal")   # 允許取消批次
+            self.srt_batch_btn.configure(state="disabled")
             self._start_pulse()
         elif state in (DONE, ERROR):
             self._stop_pulse()
             self.start_btn.configure(state="normal")
             self.cancel_btn.configure(state="disabled")
+            self.srt_batch_btn.configure(state="normal")
 
     def _show_status(self, msg: str):
         self.status_label.configure(text=msg)
