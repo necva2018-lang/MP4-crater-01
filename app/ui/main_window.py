@@ -131,26 +131,55 @@ class MainWindow(TkinterDnD.Tk):
         self.history_panel.pack_propagate(False)
 
         # 底部：進度區
-        bottom = ctk.CTkFrame(self, corner_radius=0, height=110)
+        bottom = ctk.CTkFrame(self, corner_radius=0, height=150)
         bottom.pack(fill="x", side="bottom")
         bottom.pack_propagate(False)
 
+        # row0：進度條 + 百分比
         prog_row = ctk.CTkFrame(bottom, fg_color="transparent")
-        prog_row.pack(fill="x", padx=12, pady=(10, 2))
+        prog_row.pack(fill="x", padx=12, pady=(8, 2))
 
         self.progress_bar = ctk.CTkProgressBar(prog_row)
         self.progress_bar.set(0)
         self.progress_bar.pack(side="left", fill="x", expand=True, padx=(0, 10))
 
-        self.progress_label = ctk.CTkLabel(prog_row, text="0%", width=40)
+        self.progress_label = ctk.CTkLabel(prog_row, text="0%", width=48)
         self.progress_label.pack(side="left")
 
+        # row1：主要狀態行（粗體，描述目前工作階段）
+        status_row = ctk.CTkFrame(bottom, fg_color="transparent")
+        status_row.pack(fill="x", padx=12, pady=(0, 1))
+
+        self.phase_label = ctk.CTkLabel(
+            status_row, text="", anchor="w",
+            font=ctk.CTkFont(size=13, weight="bold"),
+        )
+        self.phase_label.pack(side="left", fill="x", expand=True)
+
+        # row2：次要資訊行（速度、碼率、ETA，灰色小字）
+        detail_row = ctk.CTkFrame(bottom, fg_color="transparent")
+        detail_row.pack(fill="x", padx=12, pady=(0, 2))
+
+        self.speed_label = ctk.CTkLabel(
+            detail_row, text="", width=100, anchor="w",
+            font=ctk.CTkFont(size=11), text_color="gray60",
+        )
+        self.speed_label.pack(side="left")
+
+        self.bitrate_label = ctk.CTkLabel(
+            detail_row, text="", width=120, anchor="w",
+            font=ctk.CTkFont(size=11), text_color="gray60",
+        )
+        self.bitrate_label.pack(side="left")
+
         self.eta_label = ctk.CTkLabel(
-            bottom, text="", text_color="gray60", font=ctk.CTkFont(size=12))
-        self.eta_label.pack()
+            detail_row, text="", anchor="e",
+            font=ctk.CTkFont(size=12), text_color="gray60",
+        )
+        self.eta_label.pack(side="right", fill="x", expand=True)
 
         btn_row = ctk.CTkFrame(bottom, fg_color="transparent")
-        btn_row.pack(pady=(6, 10))
+        btn_row.pack(pady=(4, 8))
 
         self.start_btn = ctk.CTkButton(
             btn_row, text="▶  開始合併", width=160, height=40,
@@ -272,6 +301,8 @@ class MainWindow(TkinterDnD.Tk):
         self._cancel_event = threading.Event()
         self._set_state(RUNNING)
 
+        self.phase_label.configure(text="分析中…")
+
         thread = threading.Thread(
             target=self._run_merge,
             args=(files, output_path, s, self._cancel_event),
@@ -288,7 +319,9 @@ class MainWindow(TkinterDnD.Tk):
             audio_codec=settings["audio_codec"],
             crf=settings["crf"],
             hw_accel=settings["hw_accel"],
-            progress_callback=lambda pct, eta: self.after(0, self._on_progress, pct, eta),
+            progress_callback=lambda pct, eta, **kw: self.after(
+                0, lambda pct=pct, eta=eta, kw=kw: self._on_progress(pct, eta, **kw)
+            ),
             cancel_event=cancel_event,
         )
         self.after(0, self._on_merge_done, result, output_path, settings)
@@ -299,12 +332,44 @@ class MainWindow(TkinterDnD.Tk):
         if self._batch_cancel_event:
             self._batch_cancel_event.set()
 
-    def _on_progress(self, percent: float, eta: float):
+    def _on_progress(self, percent: float, eta: float, *,
+                     speed: float | None = None,
+                     bitrate: float | None = None,
+                     phase: str = "reencode",
+                     chunk_idx: int | None = None,
+                     chunk_total: int | None = None):
         self.progress_bar.set(percent / 100)
         self.progress_label.configure(text=f"{percent:.0f}%")
+
+        # 主要狀態行
+        if phase == "copy":
+            phase_text = "快速合併中（直接複製）"
+        elif phase == "chunk_final":
+            phase_text = "合併各批次…"
+        elif chunk_idx is not None and chunk_total is not None:
+            phase_text = f"重新編碼中（第 {chunk_idx} 批／{chunk_total} 批）"
+        else:
+            phase_text = "重新編碼中"
+        self.phase_label.configure(text=phase_text)
+
+        # 速度
+        if speed is not None:
+            self.speed_label.configure(text=f"速度：{speed:.1f}x")
+        else:
+            self.speed_label.configure(text="")
+
+        # 碼率
+        if bitrate is not None and bitrate > 0:
+            self.bitrate_label.configure(text=f"碼率：{bitrate:,.0f} kb/s")
+        else:
+            self.bitrate_label.configure(text="")
+
+        # ETA
         if eta > 0:
             m, s = divmod(int(eta), 60)
             self.eta_label.configure(text=f"預估剩餘：{m} 分 {s:02d} 秒")
+        else:
+            self.eta_label.configure(text="")
 
     def _on_merge_done(self, result: dict, output_path: str, settings: dict):
         duration_sec = time.time() - self._merge_start_time
@@ -314,7 +379,11 @@ class MainWindow(TkinterDnD.Tk):
 
         if result["success"]:
             self._on_progress(100, 0)
-            self.eta_label.configure(text="合併完成！")
+            dm, ds = divmod(int(duration_sec), 60)
+            self.phase_label.configure(text=f"✅ 合併完成　　總耗時：{dm} 分 {ds:02d} 秒")
+            self.eta_label.configure(text="")
+            self.speed_label.configure(text="")
+            self.bitrate_label.configure(text="")
 
             # 寫入歷史
             make_and_save_record(
@@ -361,10 +430,12 @@ class MainWindow(TkinterDnD.Tk):
 
             if "取消" in err:
                 self._set_state(IDLE)
-                self.eta_label.configure(text="已取消")
+                self.phase_label.configure(text="已取消")
+                self.eta_label.configure(text="")
             else:
                 self._set_state(ERROR)
-                self.eta_label.configure(text=f"錯誤：{err}")
+                self.phase_label.configure(text=f"❌ {err[:45]}")
+                self.eta_label.configure(text="")
                 msgbox.showerror("合併失敗", err)
 
     # ── 批次轉字幕 ───────────────────────────────────────────────────
@@ -398,7 +469,8 @@ class MainWindow(TkinterDnD.Tk):
         self._set_state(BATCH_SRT)
         self.progress_bar.set(0)
         self.progress_label.configure(text="0%")
-        self.eta_label.configure(text=f"準備辨識 {len(files)} 個檔案…")
+        self.phase_label.configure(text=f"準備批次辨識…（共 {len(files)} 個檔案）")
+        self.eta_label.configure(text="")
 
         thread = threading.Thread(
             target=self._run_batch_srt,
@@ -409,11 +481,12 @@ class MainWindow(TkinterDnD.Tk):
 
     def _run_batch_srt(self, files: list[str], out_dir: str,
                        model_size: str, cancel_event: threading.Event):
-        total    = len(files)
-        success  = 0
-        failed   = 0
-        skipped  = 0
-        start_t  = time.time()
+        total              = len(files)
+        success            = 0
+        failed             = 0
+        skipped            = 0
+        start_t            = time.time()
+        file_finish_times: list[float] = []
 
         os.makedirs(out_dir, exist_ok=True)
 
@@ -425,18 +498,26 @@ class MainWindow(TkinterDnD.Tk):
             basename = os.path.splitext(os.path.basename(video_path))[0]
             srt_path = os.path.join(out_dir, basename + ".srt")
 
+            # 計算 ETA（基於前幾個檔案的平均耗時）
+            avg_sec = (sum(file_finish_times) / len(file_finish_times)
+                       if file_finish_times else 0.0)
+            eta_sec = avg_sec * (total - idx + 1) if avg_sec > 0 else 0.0
+
             # 更新進度
             self.after(0, self._batch_progress_update,
-                       idx, total, os.path.basename(video_path))
+                       idx, total, os.path.basename(video_path),
+                       eta_sec, avg_sec)
 
+            file_start = time.time()
             result = transcribe_to_srt(
                 video_path=video_path,
                 output_srt_path=srt_path,
                 model_size=model_size,
                 status_callback=lambda msg: self.after(
-                    0, self.eta_label.configure, {"text": msg}),
+                    0, self.phase_label.configure, {"text": msg}),
                 cancel_event=cancel_event,
             )
+            file_finish_times.append(time.time() - file_start)
 
             if result["success"]:
                 success += 1
@@ -465,20 +546,40 @@ class MainWindow(TkinterDnD.Tk):
                     output_format="SRT",
                 )
 
-        self.after(0, self._on_batch_srt_done, success, failed, skipped, out_dir)
+        self.after(0, self._on_batch_srt_done, success, failed, skipped, out_dir,
+                   time.time() - start_t)
 
-    def _batch_progress_update(self, idx: int, total: int, filename: str):
+    def _batch_progress_update(self, idx: int, total: int, filename: str,
+                                eta_sec: float = 0.0, avg_sec: float = 0.0):
         pct = (idx - 1) / total * 100
         self.progress_bar.set(pct / 100)
         self.progress_label.configure(text=f"{idx}/{total}")
-        self.eta_label.configure(text=f"辨識中：{filename}")
+        self.phase_label.configure(
+            text=f"語音辨識中（第 {idx}/{total} 個）：{filename}")
+        if eta_sec > 0:
+            m, s = divmod(int(eta_sec), 60)
+            self.eta_label.configure(text=f"預估剩餘：{m} 分 {s:02d} 秒")
+        else:
+            self.eta_label.configure(text="")
+        if avg_sec > 0:
+            self.speed_label.configure(text=f"每檔平均：{avg_sec:.0f} 秒")
+        else:
+            self.speed_label.configure(text="")
 
     def _on_batch_srt_done(self, success: int, failed: int,
-                           skipped: int, out_dir: str):
+                           skipped: int, out_dir: str,
+                           total_elapsed: float = 0.0):
         self._stop_pulse()
         self.history_panel.refresh()
         self.progress_bar.set(1.0)
         self.progress_label.configure(text="完成")
+
+        dm, ds = divmod(int(total_elapsed), 60)
+        self.phase_label.configure(
+            text=f"✅ 批次字幕完成　{success}/{success+failed} 個　　總耗時：{dm} 分 {ds:02d} 秒")
+        self.eta_label.configure(text="")
+        self.speed_label.configure(text="")
+        self.bitrate_label.configure(text="")
 
         lines = [f"批次轉字幕完成！\n輸出目錄：{out_dir}\n"]
         lines.append(f"✅ 成功：{success} 個")
@@ -488,7 +589,6 @@ class MainWindow(TkinterDnD.Tk):
             lines.append(f"⏭ 已略過（取消）：{skipped} 個")
 
         self._set_state(DONE)
-        self.eta_label.configure(text=f"完成 {success}/{success+failed} 個")
         msgbox.showinfo("批次轉字幕完成", "\n".join(lines))
 
     # ── SRT 產生流程 ─────────────────────────────────────────────────
@@ -521,7 +621,7 @@ class MainWindow(TkinterDnD.Tk):
                 video_path=video_path,
                 output_srt_path=srt_path,
                 model_size=model_size,
-                status_callback=lambda msg: self.after(0, self.eta_label.configure, {"text": msg}),
+                status_callback=lambda msg: self.after(0, self.phase_label.configure, {"text": msg}),
             )
             self.after(0, on_done, result)
 
@@ -534,7 +634,9 @@ class MainWindow(TkinterDnD.Tk):
 
         if result["success"]:
             self._set_state(DONE)
-            self.eta_label.configure(text="字幕產生完成！")
+            dm, ds = divmod(int(duration_sec), 60)
+            self.phase_label.configure(text=f"✅ 字幕產生完成　總耗時：{dm} 分 {ds:02d} 秒")
+            self.eta_label.configure(text="")
             make_and_save_record(
                 record_type="srt",
                 project_name=self._current_project_name,
@@ -551,7 +653,8 @@ class MainWindow(TkinterDnD.Tk):
         else:
             err = result.get("error", "未知錯誤")
             self._set_state(ERROR)
-            self.eta_label.configure(text=f"辨識失敗：{err}")
+            self.phase_label.configure(text=f"❌ {err[:45]}")
+            self.eta_label.configure(text="")
             make_and_save_record(
                 record_type="srt",
                 project_name=self._current_project_name,
@@ -599,16 +702,27 @@ class MainWindow(TkinterDnD.Tk):
             self.srt_batch_btn.configure(state="normal")
             self.progress_bar.set(0)
             self.progress_label.configure(text="0%")
+            self.phase_label.configure(text="")
+            self.speed_label.configure(text="")
+            self.bitrate_label.configure(text="")
             self.eta_label.configure(text="")
         elif state == RUNNING:
             self.start_btn.configure(state="disabled")
             self.cancel_btn.configure(state="normal")
             self.srt_batch_btn.configure(state="disabled")
+            self.phase_label.configure(text="分析中…")
+            self.speed_label.configure(text="")
+            self.bitrate_label.configure(text="")
+            self.eta_label.configure(text="")
         elif state == TRANSCRIBING:
             self.start_btn.configure(state="disabled")
             self.cancel_btn.configure(state="disabled")
             self.srt_batch_btn.configure(state="disabled")
             self.progress_label.configure(text="辨識中")
+            self.phase_label.configure(text="辨識中…")
+            self.speed_label.configure(text="")
+            self.bitrate_label.configure(text="")
+            self.eta_label.configure(text="")
             self._start_pulse()
         elif state == BATCH_SRT:
             self.start_btn.configure(state="disabled")

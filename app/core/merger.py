@@ -63,8 +63,9 @@ def _codec_incompatible_with_container(file_infos: list[dict], output_format: st
     return False
 
 # FFmpeg stderr 進度解析用的 regex
-_TIME_RE = re.compile(r"time=(\d+):(\d+):(\d+\.\d+)")
-_SPEED_RE = re.compile(r"speed=\s*([\d.]+)x")
+_TIME_RE    = re.compile(r"time=(\d+):(\d+):(\d+\.\d+)")
+_SPEED_RE   = re.compile(r"speed=\s*([\d.]+)x")
+_BITRATE_RE = re.compile(r"bitrate=\s*([\d.]+)kbits/s")
 
 
 def merge_videos(
@@ -180,7 +181,8 @@ def _run_concat_copy(
         "-c", "copy",
         output_path,
     ]
-    return _run_ffmpeg(cmd, total_duration, progress_callback, cancel_event)
+    return _run_ffmpeg(cmd, total_duration, progress_callback, cancel_event,
+                       phase="copy")
 
 
 # ── 重新編碼合併 ─────────────────────────────────────────────────────────────
@@ -256,6 +258,7 @@ def _run_ffmpeg(
     total_duration: float,
     progress_callback,
     cancel_event: threading.Event | None,
+    phase: str = "reencode",
 ) -> dict:
     try:
         proc = subprocess.Popen(
@@ -292,13 +295,25 @@ def _run_ffmpeg(
                 percent = min(elapsed / total_duration * 100, 100)
 
                 eta = 0.0
+                speed: float | None = None
                 s_match = _SPEED_RE.search(line)
                 if s_match:
                     speed = float(s_match.group(1))
                     if speed > 0:
                         eta = max((total_duration - elapsed) / speed, 0.0)
+                    else:
+                        speed = None
 
-                progress_callback(percent, eta)
+                bitrate: float | None = None
+                b_match = _BITRATE_RE.search(line)
+                if b_match:
+                    try:
+                        bitrate = float(b_match.group(1))
+                    except ValueError:
+                        pass
+
+                progress_callback(percent, eta,
+                                  speed=speed, bitrate=bitrate, phase=phase)
 
     proc.wait()
 
@@ -382,10 +397,18 @@ def _chunked_reencode(
                         f.write(f"file '{os.path.abspath(p).replace(chr(92), '/')}'\n")
 
                 # 包裝 progress_callback，將此批進度映射到全域進度
-                def _scoped_cb(pct, eta, _base=progress_base, _ratio=chunk_ratio):
+                def _scoped_cb(pct, eta, _base=progress_base, _ratio=chunk_ratio,
+                               _cidx=chunk_idx, _ctotal=len(chunks),
+                               speed=None, bitrate=None, phase="reencode", **_kw):
                     if progress_callback:
                         global_pct = _base * 100 + pct * _ratio
-                        progress_callback(min(global_pct, 95.0), eta)
+                        progress_callback(
+                            min(global_pct, 95.0), eta,
+                            speed=speed, bitrate=bitrate,
+                            phase="reencode",
+                            chunk_idx=_cidx + 1,
+                            chunk_total=_ctotal,
+                        )
 
                 result = _run_reencode(
                     tmp_list, tmp_out, fmt,
@@ -413,9 +436,15 @@ def _chunked_reencode(
                 for p in tmp_files:
                     f.write(f"file '{p.replace(chr(92), '/')}'\n")
 
-            def _final_cb(pct, eta):
+            def _final_cb(pct, eta, _ctotal=len(chunks), **_kw):
                 if progress_callback:
-                    progress_callback(95.0 + pct * 0.05, eta)
+                    progress_callback(
+                        95.0 + pct * 0.05, eta,
+                        speed=None, bitrate=None,
+                        phase="chunk_final",
+                        chunk_idx=_ctotal,
+                        chunk_total=_ctotal,
+                    )
 
             result = _run_concat_copy(
                 final_list, output_path,

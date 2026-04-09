@@ -102,7 +102,13 @@ def transcribe_to_srt(
             sys.stderr = io.StringIO()
 
         try:
-            model = whisper.load_model(model_size)
+            # 將模型快取存在 data/whisper_models/（與 exe 同層），實現綠色程式
+            from app.core.project import get_global_history_dir
+            import os as _os
+            _model_dir = _os.path.join(_os.path.dirname(get_global_history_dir()),
+                                       "whisper_models")
+            _os.makedirs(_model_dir, exist_ok=True)
+            model = whisper.load_model(model_size, download_root=_model_dir)
 
             if cancel_event and cancel_event.is_set():
                 return {"success": False, "error": "使用者已取消"}

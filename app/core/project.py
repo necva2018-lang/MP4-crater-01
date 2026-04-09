@@ -67,12 +67,25 @@ def load_project(vmproj_path: str) -> dict:
         raise ValueError(f"無法讀取專案檔：{e}") from e
 
 
-# ── 全域歷史（AppData）────────────────────────────────────────────────────────
+# ── 全域歷史（綠色程式：data/ 資料夾與 exe 同層）────────────────────────────
 
 def get_global_history_dir() -> str:
-    """回傳 %AppData%\\VideoMerger\\，若不存在則建立。"""
-    appdata = os.environ.get("APPDATA", os.path.expanduser("~"))
-    d = os.path.join(appdata, "VideoMerger")
+    """
+    回傳歷史紀錄資料夾路徑並確保其存在。
+
+    綠色程式模式（PyInstaller 打包後）：
+        <exe所在目錄>/data/
+    開發模式（直接執行 python main.py）：
+        <專案根目錄>/data/
+    """
+    import sys
+    if getattr(sys, "frozen", False):
+        # 打包後：sys.executable = .../VideoMerger/VideoMerger.exe
+        base = os.path.dirname(sys.executable)
+    else:
+        # 開發模式：project.py 位於 app/core/，根目錄往上兩層
+        base = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    d = os.path.join(base, "data")
     os.makedirs(d, exist_ok=True)
     return d
 
